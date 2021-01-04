@@ -15,7 +15,7 @@ import java.util.*;
 
 @SuppressWarnings("unchecked")
 class ProcessorConnectionHandler implements ConnectionHandler {
-    private ProxyNetConfig config;
+    private final ProxyNetConfig config;
     private final Processor processor;
     private final Processor.Context topCtx;
     private final Connection frontendConnection;
@@ -413,7 +413,7 @@ class ProcessorConnectionHandler implements ConnectionHandler {
 
     private boolean frontendIsHandlingConnection = false; // true: consider handlingConnection, false: consider frontendByteFlow
     private BackendConnectionHandler handlingConnection;
-    private FrontendByteFlow frontendByteFlow = new FrontendByteFlow();
+    private final FrontendByteFlow frontendByteFlow = new FrontendByteFlow();
 
     class FrontendByteFlow {
         class Segment {
