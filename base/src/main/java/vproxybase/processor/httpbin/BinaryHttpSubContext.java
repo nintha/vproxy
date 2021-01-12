@@ -16,8 +16,8 @@ import java.util.*;
 import java.util.function.Supplier;
 
 public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
-    private static final ByteArray H2_PREFACE = ByteArray.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
-    private static final int H2_HEADER_SIZE = 3 + 1 + 1 + 4; // header length: len+type+flags+streamId
+    public static final ByteArray H2_PREFACE = ByteArray.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    public static final int H2_HEADER_SIZE = 3 + 1 + 1 + 4; // header length: len+type+flags+streamId
     private static final ByteArray SERVER_SETTINGS = SettingsFrame.newServerSettings().serializeH2(null).arrange();
     private static final ByteArray CLIENT_FIRST_FRAME =
         H2_PREFACE.concat(SettingsFrame.newClientSettings().serializeH2(null)).arrange();
@@ -486,6 +486,7 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         }
 
         var another = session.another(stream);
+        System.out.println(another.streamId + "/" + another.ctx.connId);
         frame.streamId = (int) another.streamId;
         if (onlyPayload) {
             dataToProxy = frame.serializeH2Payload(another.ctx);
