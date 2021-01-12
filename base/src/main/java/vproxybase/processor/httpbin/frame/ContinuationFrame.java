@@ -48,6 +48,11 @@ public class ContinuationFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
+    public boolean endHeaders() {
+        return endHeaders;
+    }
+
+    @Override
     public List<Header> headers() {
         return headers;
     }

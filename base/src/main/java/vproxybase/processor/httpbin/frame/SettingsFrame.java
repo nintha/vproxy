@@ -6,6 +6,7 @@ import vproxybase.processor.httpbin.HttpFrame;
 import vproxybase.processor.httpbin.HttpFrameType;
 import vproxybase.processor.httpbin.entity.Setting;
 import vproxybase.util.ByteArray;
+import vproxybase.util.Logger;
 
 import java.util.LinkedList;
 import java.util.List;
@@ -130,6 +131,11 @@ public class SettingsFrame extends HttpFrame {
             }
         }
         this.otherSettings = settings;
+    }
+
+    @Override
+    public ByteArray serializeH2(BinaryHttpSubContext subCtx) {
+        return serializeH2NoException(subCtx);
     }
 
     @Override

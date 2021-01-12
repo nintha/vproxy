@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Map;
 
 public interface WithHeaders {
+    boolean endHeaders();
+
     List<Header> headers();
 
     default Map<String, String> toMap() {

@@ -7,6 +7,7 @@ import vproxybase.processor.httpbin.entity.Header;
 import vproxybase.processor.httpbin.frame.*;
 import vproxybase.processor.httpbin.hpack.HPack;
 import vproxybase.util.ByteArray;
+import vproxybase.util.LogType;
 import vproxybase.util.Logger;
 import vproxybase.util.RingBuffer;
 import vproxybase.util.nio.ByteArrayChannel;
@@ -15,13 +16,13 @@ import java.util.*;
 import java.util.function.Supplier;
 
 public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
-    private Processor.Mode mode = Processor.Mode.handle; // initially handle
-    private boolean expectNewFrame = true; // initially expect new frame
-    private int len;
-    private ByteArray produced;
+    private static final ByteArray H2_PREFACE = ByteArray.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+    private static final int H2_HEADER_SIZE = 3 + 1 + 1 + 4; // header length: len+type+flags+streamId
+    private static final ByteArray SERVER_SETTINGS = SettingsFrame.newServerSettings().serializeH2(null).arrange();
+    private static final ByteArray CLIENT_FIRST_FRAME =
+        H2_PREFACE.concat(SettingsFrame.newClientSettings().serializeH2(null)).arrange();
+    private static final ByteArray ACK_SETTINGS = SettingsFrame.newAck().serializeH2(null).arrange();
 
-    private final HPack hpack = new HPack(SettingsFrame.DEFAULT_HEADER_TABLE_SIZE, SettingsFrame.DEFAULT_HEADER_TABLE_SIZE);
-    private int state = 0;
     // 0: initiated, expecting preface => 1
     // 1: expecting first settings frame header => 2
     // 2: expecting first settings frame => 3
@@ -36,19 +37,28 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
     public static final int STATE_FIRST_SETTINGS_FRAME = 2;
     public static final int STATE_FRAME_HEADER = 3;
     public static final int STATE_HEADERS_FRAME = 4;
-    public static final int STATE_DATE_FRAME = 5;
+    public static final int STATE_DATA_FRAME = 5;
     public static final int STATE_OTHER_FRAME = 6;
     public static final int STATE_CONTINUATION_FRAME_HEADER = 7;
     public static final int STATE_CONTINUATION_FRAME = 8;
+    private int state = 0;
 
-    private static final ByteArray H2_PREFACE = ByteArray.from("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
-    private static final int H2_HEADER_SIZE = 3 + 1 + 1 + 4; // header length: len+type+flags+streamId
+    private final HPack hpack = new HPack(SettingsFrame.DEFAULT_HEADER_TABLE_SIZE, SettingsFrame.DEFAULT_HEADER_TABLE_SIZE);
+
+    final StreamHolder streamHolder;
+    Stream lastPendingStream = null;
+
+    private int connectionSendingWindow = SettingsFrame.DEFAULT_WINDOW_SIZE;
+    private int connectionReceivingWindow = SettingsFrame.DEFAULT_WINDOW_SIZE;
+    private int initialSendingWindow = connectionSendingWindow;
+    private final int initialReceivingWindow = connectionReceivingWindow; // will not modify
 
     public BinaryHttpSubContext(BinaryHttpContext binaryHttpContext, int connId) {
         super(binaryHttpContext, connId);
         if (connId != 0) { // backend
             state = STATE_FIRST_SETTINGS_FRAME_HEADER;
         }
+        streamHolder = new StreamHolder(this);
         init();
     }
 
@@ -60,19 +70,22 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         }
     }
 
-    public HPack getHPack() {
-        return hpack;
-    }
-
     @Override
     public Processor.Mode mode() {
-        return mode;
+        if (state == STATE_DATA_FRAME) {
+            return Processor.Mode.proxy;
+        }
+        return Processor.Mode.handle;
     }
+
+    private boolean expectNewFrame = true; // initially expect new frame
 
     @Override
     public boolean expectNewFrame() {
         return expectNewFrame;
     }
+
+    private int len;
 
     @Override
     public int len() {
@@ -86,7 +99,7 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         }
     }
 
-    private ByteArray proxiedBytesFromFeed;
+    ByteArray dataToProxy;
 
     @Override
     public ByteArray feed(ByteArray data) throws Exception {
@@ -111,9 +124,9 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 break;
         }
         assert Logger.lowLevelDebug("binary http parser current frame: " + parsingFrame);
-        var proxiedBytesFromFeed = this.proxiedBytesFromFeed;
-        this.proxiedBytesFromFeed = null;
-        return proxiedBytesFromFeed;
+        var dataToProxy = this.dataToProxy;
+        this.dataToProxy = null;
+        return dataToProxy;
     }
 
     private void readPreface(ByteArray data) throws Exception {
@@ -123,9 +136,22 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         expectNewFrame = true;
         setLen(H2_HEADER_SIZE);
         parsingFrame = lastParsedFrame = new Preface();
+
+        // preface is received, need send initial settings frame
+        sendInitialFrame();
     }
 
-    public static final Supplier<HttpFrame>[] h2frames;
+    private void sendInitialFrame() {
+        if (connId == 0) {
+            // is server, need to send server settings
+            produced = SERVER_SETTINGS;
+        } else {
+            // is client, need to send preface and settings
+            produced = CLIENT_FIRST_FRAME;
+        }
+    }
+
+    private static final Supplier<HttpFrame>[] h2frames;
 
     static {
         {
@@ -191,13 +217,15 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 }
                 break;
             case DATA:
-                state = STATE_DATE_FRAME;
-                mode = Processor.Mode.proxy; // simply proxy the bytes
+                determineProxiedConnection();
+                state = STATE_DATA_FRAME;
                 break;
             case HEADERS:
+                determineProxiedConnection();
                 state = STATE_HEADERS_FRAME;
                 break;
             case CONTINUATION:
+                determineProxiedConnection();
                 if (state != STATE_CONTINUATION_FRAME_HEADER) {
                     throw new ExceptionWithoutStackTrace("unexpected continuation frame");
                 }
@@ -213,6 +241,29 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         } else {
             expectNewFrame = false; // expecting payload
             setLen(parsingFrame.length);
+        }
+    }
+
+    private void determineProxiedConnection() {
+        if (connId != 0) { // do not determine for backend connections
+            return;
+        }
+
+        int streamId = parsingFrame.streamId;
+        if (streamHolder.contains(streamId)) {
+            Stream stream = streamHolder.get(streamId);
+            assert Logger.lowLevelDebug("stream " + streamId + " already registered: " + stream);
+            StreamSession session = stream.getSession();
+            if (session == null) {
+                assert Logger.lowLevelDebug("stream " + streamId + " session not set yet");
+                ctx.currentProxyTarget = null;
+            } else {
+                ctx.currentProxyTarget = session.another(stream);
+            }
+        } else {
+            assert Logger.lowLevelDebug("stream " + streamId + " not found, register it");
+            streamHolder.register(streamId, initialSendingWindow, initialReceivingWindow);
+            ctx.currentProxyTarget = null;
         }
     }
 
@@ -240,22 +291,19 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         if (state == STATE_FIRST_SETTINGS_FRAME) {
             handleFirstSettingsFrame();
         } else if (parsingFrame instanceof HeadersFrame) {
-            if (((HeadersFrame) parsingFrame).endHeaders) {
-                handleHeaders((HeadersFrame) parsingFrame, Collections.emptyList());
-            } else {
-                lastHeadersAndContinuation.add(parsingFrame);
+            HeadersFrame headersFrame = (HeadersFrame) parsingFrame;
+            handleAllHeaders();
+            if (headersFrame.endHeaders) {
+                handleEndHeaders();
             }
+            serializeToProxy(parsingFrame);
         } else if (parsingFrame instanceof ContinuationFrame) {
-            if (((ContinuationFrame) parsingFrame).endHeaders) {
-                HeadersFrame headersFrame = (HeadersFrame) lastHeadersAndContinuation.get(0);
-                List<ContinuationFrame> continuationFrames = new ArrayList<>(lastHeadersAndContinuation.size() - 1);
-                for (int i = 1; i < lastHeadersAndContinuation.size(); ++i) {
-                    continuationFrames.add((ContinuationFrame) lastHeadersAndContinuation.get(i));
-                }
-                handleHeaders(headersFrame, continuationFrames);
-            } else {
-                lastHeadersAndContinuation.add(parsingFrame);
+            handleAllHeaders();
+            ContinuationFrame continuationFrame = (ContinuationFrame) parsingFrame;
+            if (continuationFrame.endHeaders) {
+                handleEndHeaders();
             }
+            serializeToProxy(parsingFrame);
         } else if (parsingFrame instanceof SettingsFrame) {
             handleSettingsFrame();
         } else if (parsingFrame instanceof WindowUpdateFrame) {
@@ -263,39 +311,136 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         }
     }
 
-    private void handleFirstSettingsFrame() {
+    private void serializeToProxy(HttpFrame frame) throws Exception {
+        int streamId = frame.streamId;
+        if (streamId == 0) {
+            String err = "frames used to call serializeToProxy must be attached to a stream";
+            Logger.error(LogType.IMPROPER_USE, err);
+            throw new Exception(err);
+        }
+        Stream stream = streamHolder.get(streamId);
+        if (stream == null) {
+            String err = "cannot proxy frame " + frame + " because the stream is not registered";
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, err);
+            throw new Exception(err);
+        }
+
+        var session = stream.getSession();
+        if (session == null) { // not established
+            String err = "cannot proxy frame " + frame + " because the target stream is not established";
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, err);
+            throw new Exception(err);
+        }
+
+        var another = session.another(stream);
+        frame.streamId = (int) another.streamId;
+        dataToProxy = frame.serializeH2(another.ctx);
+    }
+
+    private void handleFirstSettingsFrame() throws ExceptionWithoutStackTrace {
         assert Logger.lowLevelDebug("got first settings frame:" + parsingFrame);
         SettingsFrame settings = (SettingsFrame) parsingFrame;
+        if (settings.ack) {
+            throw new ExceptionWithoutStackTrace("the first settings frame must not be an ack");
+        }
+        doHandleSettingsFrame(settings);
+        // in addition to ordinary settings frame handling
+        // more settings may be processed in the settings frame
+        if (settings.initialWindowSizeSet) {
+            connectionSendingWindow += settings.initialWindowSize - initialSendingWindow;
+            assert Logger.lowLevelDebug("current sendingWindow = " + connectionSendingWindow);
+        }
+    }
+
+    private void sendSettingsAck() {
+        produced = ACK_SETTINGS;
+    }
+
+    private void handleAllHeaders() {
+        String path = null;
+        String host = null;
+
+        var headers = ((WithHeaders) parsingFrame).headers();
+        for (var ite = headers.iterator(); ite.hasNext(); ) {
+            Header h = ite.next();
+            if (h.keyStr.equalsIgnoreCase("x-forwarded-for")) {
+                ite.remove();
+            } else if (h.keyStr.equalsIgnoreCase("x-client-port")) {
+                ite.remove();
+            } else if (connId == 0) { // is frontend, need to dispatch request by path and host
+                if (h.keyStr.equalsIgnoreCase(":path")) {
+                    path = new String(h.value);
+                } else if (h.keyStr.equalsIgnoreCase("host")) {
+                    host = new String(h.value);
+                }
+            }
+        }
+
+        if (connId == 0) { // frontend
+            assert Logger.lowLevelDebug("retrieved path = " + path);
+            assert Logger.lowLevelDebug("retrieved host = " + host);
+
+            Stream s = streamHolder.get(parsingFrame.streamId);
+            if (s != null) {
+                s.updatePathAndHost(path, host);
+            }
+        }
+    }
+
+    private void handleEndHeaders() {
+        var headers = ((WithHeaders) parsingFrame).headers();
+
+        // add x-forwarded-for and x-client-port
+        headers.add(new Header("x-forwarded-for", ctx.clientAddress.getAddress().formatToIPString()));
+        headers.add(new Header("x-client-port", ctx.clientAddress.getPort() + ""));
+
+        if (connId == 0) { // is frontend
+            Stream s = streamHolder.get(parsingFrame.streamId);
+            if (s != null) {
+                ctx.currentHint = s.generateHint();
+            }
+        }
+    }
+
+    private void handleSettingsFrame() {
+        assert Logger.lowLevelDebug("got settings frame: " + parsingFrame);
+        SettingsFrame settings = (SettingsFrame) parsingFrame;
+        if (settings.ack) {
+            assert Logger.lowLevelDebug("is settings ack, ignore");
+            return;
+        }
+        doHandleSettingsFrame(settings);
+    }
+
+    private void doHandleSettingsFrame(SettingsFrame settings) {
         if (settings.headerTableSizeSet) {
             int tableSize = settings.headerTableSize;
             hpack.setEncoderMaxHeaderTableSize(tableSize);
         }
-    }
-
-    private void handleHeaders(HeadersFrame headersFrame, List<ContinuationFrame> continuationFrames) throws Exception {
-        lastHeadersAndContinuation.clear();
-
-        HttpFrame frame;
-        List<Header> headers;
-        if (continuationFrames.isEmpty()) {
-            frame = headersFrame;
-            headers = headersFrame.headers;
-        } else {
-            frame = continuationFrames.get(continuationFrames.size() - 1);
-            headers = continuationFrames.get(continuationFrames.size() - 1).headers;
+        if (settings.initialWindowSizeSet) {
+            initialSendingWindow = settings.initialWindowSize;
         }
-        // TODO
-
-        proxiedBytesFromFeed = frame.serializeH2Payload(this);
+        // since the settings frame is received, we need to send back an ack
+        sendSettingsAck();
     }
 
-    private void handleSettingsFrame() {
-        // TODO
+    private void handleWindowUpdate() {
+        assert Logger.lowLevelDebug("got window update frame: " + parsingFrame);
+        WindowUpdateFrame windowUpdate = (WindowUpdateFrame) parsingFrame;
+        int incr = windowUpdate.windowSizeIncrement;
+        if (windowUpdate.streamId == 0) {
+            connectionSendingWindow += incr;
+            assert Logger.lowLevelDebug("current sendingWindow = " + connectionSendingWindow);
+        } else {
+            Stream stream = streamHolder.get(windowUpdate.streamId);
+            if (stream == null) {
+                return; // no need to update
+            }
+            stream.sendingWindow += incr;
+        }
     }
 
-    private void handleWindowUpdate() throws Exception {
-        // TODO
-    }
+    private ByteArray produced;
 
     @Override
     public ByteArray produce() {
@@ -306,28 +451,67 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
 
     @Override
     public void proxyDone() {
-        if (state == STATE_DATE_FRAME) {
+        if (state == STATE_DATA_FRAME) {
+            assert Logger.lowLevelDebug("data frame proxy done");
+            DataFrame data = (DataFrame) parsingFrame;
+            decreaseReceivingWindow(data.streamId, data.length);
             state = STATE_FRAME_HEADER;
             expectNewFrame = true;
             setLen(H2_HEADER_SIZE);
-            mode = Processor.Mode.handle;
         } else {
-            assert Logger.lowLevelDebug("not expecting proxyDone called in state " + state);
+            Logger.shouldNotHappen("not expecting proxyDone called in state " + state);
         }
+    }
+
+    private void decreaseReceivingWindow(int streamId, int length) {
+        connectionReceivingWindow -= length;
+        assert Logger.lowLevelDebug("current connection rcv wnd: " + connectionReceivingWindow);
+        if (connectionReceivingWindow < initialReceivingWindow / 2) {
+            sendWindowUpdate(null);
+        }
+
+        Stream stream = streamHolder.get(streamId);
+        if (stream == null) {
+            assert Logger.lowLevelDebug("stream " + streamId + " not found");
+        } else {
+            stream.receivingWindow -= length;
+            assert Logger.lowLevelDebug("stream " + streamId + " rcv wnd: " + stream.receivingWindow);
+            if (stream.receivingWindow < initialReceivingWindow / 2) {
+                sendWindowUpdate(stream);
+            }
+        }
+    }
+
+    private void sendWindowUpdate(Stream stream) {
+        assert Logger.lowLevelDebug("send window update called on " + (stream == null ? 0 : stream.streamId));
+        WindowUpdateFrame windowUpdate = new WindowUpdateFrame();
+        if (stream == null) {
+            windowUpdate.streamId = 0;
+            windowUpdate.windowSizeIncrement = initialReceivingWindow - connectionReceivingWindow;
+            connectionReceivingWindow = initialReceivingWindow;
+        } else {
+            windowUpdate.streamId = (int) stream.streamId;
+            windowUpdate.windowSizeIncrement = initialReceivingWindow - stream.receivingWindow;
+            stream.receivingWindow = initialReceivingWindow;
+        }
+        produced = windowUpdate.serializeH2(this);
     }
 
     @Override
     public ByteArray connected() {
-        return null; // TODO
+        sendInitialFrame();
+        return produce();
     }
 
-    // stores headers and continuations, will inspect or modify them
-    private final List<HttpFrame> lastHeadersAndContinuation = new ArrayList<>(2);
     // fields and methods for parserMode
     private boolean parserMode = false;
     private ByteArrayChannel chnl;
     private HttpFrame parsingFrame;
     private HttpFrame lastParsedFrame;
+
+    public HPack getHPack() {
+        return hpack;
+    }
 
     public void setParserMode() {
         if ((connId == 0 && state != STATE_PREFACE) || (connId != 0 && state != STATE_FIRST_SETTINGS_FRAME_HEADER))

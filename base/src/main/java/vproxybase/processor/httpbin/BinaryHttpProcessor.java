@@ -26,7 +26,7 @@ public class BinaryHttpProcessor extends OOProcessor<BinaryHttpContext, BinaryHt
 
     @Override
     public BinaryHttpContext init(IPPort clientAddress) {
-        return new BinaryHttpContext();
+        return new BinaryHttpContext(clientAddress);
     }
 
     @Override

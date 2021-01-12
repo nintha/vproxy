@@ -295,7 +295,7 @@ class ProcessorConnectionHandler implements ConnectionHandler {
                     assert Logger.lowLevelDebug("the expected message length is " + len);
                     if (len == 0) { // if nothing to read, then directly feed empty data to the processor
                         try {
-                            processor.feed(topCtx, subCtx, ByteArray.from(new byte[0]));
+                            processor.feed(topCtx, subCtx, ByteArray.allocate(0));
                         } catch (Exception e) {
                             Logger.warn(LogType.INVALID_EXTERNAL_DATA, "user code cannot handle data from " + conn + ", which corresponds to " + frontendConnection + ".", e);
                             frontendConnection.close(true);
@@ -597,7 +597,7 @@ class ProcessorConnectionHandler implements ConnectionHandler {
                 assert Logger.lowLevelDebug("expecting message with the length of " + len);
                 if (len == 0) { // if the length is 0, directly feed data to the processor
                     try {
-                        processor.feed(topCtx, frontendSubCtx, ByteArray.from(new byte[0]));
+                        processor.feed(topCtx, frontendSubCtx, ByteArray.allocate(0));
                     } catch (Exception e) {
                         Logger.warn(LogType.INVALID_EXTERNAL_DATA, "user code cannot handle data from " + frontendConnection + ". err=" + e);
                         frontendConnection.close(true);

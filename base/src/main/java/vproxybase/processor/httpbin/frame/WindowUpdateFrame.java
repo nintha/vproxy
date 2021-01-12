@@ -27,6 +27,11 @@ public class WindowUpdateFrame extends HttpFrame {
     }
 
     @Override
+    public ByteArray serializeH2(BinaryHttpSubContext subCtx) {
+        return serializeH2NoException(subCtx);
+    }
+
+    @Override
     protected byte serializeFlags() {
         return 0;
     }
