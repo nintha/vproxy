@@ -4,13 +4,11 @@ import vfd.IPPort;
 import vproxybase.processor.Hint;
 import vproxybase.processor.OOContext;
 import vproxybase.processor.httpbin.frame.SettingsFrame;
-import vproxybase.util.ByteArray;
 import vproxybase.util.Logger;
-
-import java.util.List;
 
 public class BinaryHttpContext extends OOContext<BinaryHttpSubContext> {
     final IPPort clientAddress;
+    BinaryHttpSubContext frontend; // considered not null
 
     // proxy settings
     Stream currentProxyTarget;
@@ -38,17 +36,16 @@ public class BinaryHttpContext extends OOContext<BinaryHttpSubContext> {
 
     @Override
     public void chosen(BinaryHttpSubContext front, BinaryHttpSubContext subCtx) {
-        if (front.lastPendingStream == null) {
+        if (front.currentPendingStream == null) {
             Logger.shouldNotHappen("front.lastPendingStream is null while chosen() is called");
             return;
         }
-        Stream frontendStream = front.lastPendingStream;
+        Stream frontendStream = front.currentPendingStream;
+        front.currentPendingStream = null;
 
         // need to create a client Stream to the backend
         Stream backendStream = subCtx.streamHolder.createClientStream(SettingsFrame.DEFAULT_WINDOW_SIZE, SettingsFrame.DEFAULT_WINDOW_SIZE);
         // create session
-        StreamSession session = new StreamSession(frontendStream, backendStream);
-        frontendStream.setSession(session);
-        backendStream.setSession(session);
+        new StreamSession(frontendStream, backendStream);
     }
 }

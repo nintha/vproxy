@@ -23,12 +23,12 @@ public class CancelPushFrame extends HttpFrame {
     }
 
     @Override
-    protected byte serializeFlags() {
+    public byte serializeFlags() {
         return 0; // TODO
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         throw new UnsupportedOperationException();
     }
 

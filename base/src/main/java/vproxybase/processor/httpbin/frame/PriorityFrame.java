@@ -27,12 +27,12 @@ public class PriorityFrame extends HttpFrame {
     }
 
     @Override
-    protected byte serializeFlags() {
+    public byte serializeFlags() {
         return 0;
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         return ByteArray.allocate(5).int32(0, streamDependency).set(4, (byte) weight);
     }
 

@@ -1,6 +1,5 @@
 package vproxybase.processor.httpbin.frame;
 
-import vproxybase.processor.ExceptionWithoutStackTrace;
 import vproxybase.processor.httpbin.BinaryHttpSubContext;
 import vproxybase.processor.httpbin.HttpFrame;
 import vproxybase.processor.httpbin.HttpFrameType;
@@ -36,14 +35,14 @@ public class DataFrame extends HttpFrame {
     }
 
     @Override
-    protected byte serializeFlags() throws Exception {
+    public byte serializeFlags() {
         byte ret = 0;
         if (endStream) {
             ret |= 0x1;
         }
         if (padded) {
             if (padding == null || padding.length() == 0) {
-                throw new ExceptionWithoutStackTrace("data.padded set but padding not specified");
+                throw new IllegalArgumentException("data.padded set but padding not specified");
             }
             ret |= 0x8;
         }
@@ -51,7 +50,7 @@ public class DataFrame extends HttpFrame {
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         ByteArray payload;
         if (padded) {
             payload = ByteArray.allocate(1).set(0, (byte) padding.length())

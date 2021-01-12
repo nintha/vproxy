@@ -1,6 +1,5 @@
 package vproxybase.processor.httpbin.frame;
 
-import vproxybase.processor.ExceptionWithoutStackTrace;
 import vproxybase.processor.httpbin.BinaryHttpSubContext;
 import vproxybase.processor.httpbin.HttpFrame;
 import vproxybase.processor.httpbin.HttpFrameType;
@@ -9,7 +8,7 @@ import vproxybase.util.ByteArray;
 
 import java.util.*;
 
-public class HeadersFrame extends HttpFrame implements WithHeaders {
+public class HeadersFrame extends HttpFrame implements WithHeaders, WithPriority {
     public boolean endStream;
     public boolean endHeaders;
     public boolean padded;
@@ -107,7 +106,7 @@ public class HeadersFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
-    protected byte serializeFlags() throws Exception {
+    public byte serializeFlags() {
         byte ret = 0;
         if (endStream) {
             ret |= 0x1;
@@ -117,7 +116,7 @@ public class HeadersFrame extends HttpFrame implements WithHeaders {
         }
         if (padded) {
             if (padding == null || padding.length() == 0) {
-                throw new ExceptionWithoutStackTrace("headers.padded is set but padding not specified");
+                throw new IllegalArgumentException("headers.padded is set but padding not specified");
             }
             ret |= 0x8;
         }
@@ -128,7 +127,7 @@ public class HeadersFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) throws Exception {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         ByteArray headers = subCtx.getHPack().encode(this.headers);
         if (padded && priority) {
             return ByteArray.allocate(6).set(0, (byte) padding.length())
@@ -171,6 +170,26 @@ public class HeadersFrame extends HttpFrame implements WithHeaders {
     @Override
     public List<Header> headers() {
         return headers;
+    }
+
+    @Override
+    public boolean priority() {
+        return priority;
+    }
+
+    @Override
+    public int streamDependency() {
+        return streamDependency;
+    }
+
+    @Override
+    public int weight() {
+        return weight;
+    }
+
+    @Override
+    public void unsetPriority() {
+        priority = false;
     }
 }
 

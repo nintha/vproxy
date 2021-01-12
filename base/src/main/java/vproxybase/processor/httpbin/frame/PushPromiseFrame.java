@@ -1,6 +1,5 @@
 package vproxybase.processor.httpbin.frame;
 
-import vproxybase.processor.ExceptionWithoutStackTrace;
 import vproxybase.processor.httpbin.BinaryHttpSubContext;
 import vproxybase.processor.httpbin.HttpFrame;
 import vproxybase.processor.httpbin.HttpFrameType;
@@ -61,14 +60,14 @@ public class PushPromiseFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
-    protected byte serializeFlags() throws Exception {
+    public byte serializeFlags() {
         byte ret = 0;
         if (endHeaders) {
             ret |= 0x4;
         }
         if (padded) {
             if (padding == null || padding.length() == 0) {
-                throw new ExceptionWithoutStackTrace("pushPromise.padded is set but padding not specified");
+                throw new IllegalArgumentException("pushPromise.padded is set but padding not specified");
             }
             ret |= 0x8;
         }
@@ -76,7 +75,7 @@ public class PushPromiseFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) throws Exception {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         ByteArray headers = subCtx.getHPack().encode(this.headers);
         if (padded) {
             return ByteArray.allocate(5).set(0, (byte) padding.length())

@@ -46,7 +46,7 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
     private final HPack hpack = new HPack(SettingsFrame.DEFAULT_HEADER_TABLE_SIZE, SettingsFrame.DEFAULT_HEADER_TABLE_SIZE);
 
     final StreamHolder streamHolder;
-    Stream lastPendingStream = null;
+    Stream currentPendingStream = null;
 
     private int connectionSendingWindow = SettingsFrame.DEFAULT_WINDOW_SIZE;
     private int connectionReceivingWindow = SettingsFrame.DEFAULT_WINDOW_SIZE;
@@ -55,7 +55,9 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
 
     public BinaryHttpSubContext(BinaryHttpContext binaryHttpContext, int connId) {
         super(binaryHttpContext, connId);
-        if (connId != 0) { // backend
+        if (connId == 0) { // frontend
+            ctx.frontend = this;
+        } else { // backend
             state = STATE_FIRST_SETTINGS_FRAME_HEADER;
         }
         streamHolder = new StreamHolder(this);
@@ -85,11 +87,16 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         return expectNewFrame;
     }
 
+    private boolean dataPendingToBeProxied = false;
     private int len;
 
     @Override
     public int len() {
-        return len;
+        if (dataPendingToBeProxied) {
+            return 0; // the lib should directly call feed
+        } else {
+            return len; // normal return
+        }
     }
 
     private void setLen(int len) {
@@ -99,10 +106,23 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         }
     }
 
-    ByteArray dataToProxy;
+    private ByteArray dataToProxy;
+
+    private ByteArray returnDataToProxy() {
+        var dataToProxy = this.dataToProxy;
+        this.dataToProxy = null;
+        return dataToProxy;
+    }
 
     @Override
     public ByteArray feed(ByteArray data) throws Exception {
+        if (dataPendingToBeProxied) {
+            handlePendingFrame(data);
+            return returnDataToProxy();
+        }
+
+        assert Logger.lowLevelDebug("state before handling frames: " + state);
+
         switch (state) {
             case STATE_PREFACE:
                 readPreface(data);
@@ -123,10 +143,26 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 readFramePayload(data);
                 break;
         }
+        assert Logger.lowLevelDebug("state after handling frames: " + state);
         assert Logger.lowLevelDebug("binary http parser current frame: " + parsingFrame);
-        var dataToProxy = this.dataToProxy;
-        this.dataToProxy = null;
-        return dataToProxy;
+        assert Logger.lowLevelNetDebug("proxy from feed(): " + (dataToProxy == null ? "null" : dataToProxy.toHexString()));
+        return returnDataToProxy();
+    }
+
+    private void handlePendingFrame(ByteArray data) throws Exception {
+        if (parserMode) {
+            return;
+        }
+
+        assert Logger.lowLevelDebug("returning pending data");
+        if (data.length() != 0) {
+            String errMsg = "the feed data length must be 0 when data pending to be proxied";
+            throw new Exception(errMsg);
+        }
+        assert Logger.lowLevelDebug("proxy pending frame: " + parsingFrame);
+        serializeToProxy(false);
+        dataPendingToBeProxied = false; // un-setting must be after serialization done
+        assert Logger.lowLevelNetDebug("dataPendingToBeProxied of feed(): " + dataToProxy.toHexString());
     }
 
     private void readPreface(ByteArray data) throws Exception {
@@ -187,18 +223,23 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         byte flags = data.get(4);
         int streamId = data.int32(5);
 
-        if (len > 16 * 1024 * 1024)
+        if (len > 1024 * 1024)
             throw new ExceptionWithoutStackTrace("frame too large, len: " + len);
         if (type < 0 || type >= h2frames.length || h2frames[type] == null)
             throw new ExceptionWithoutStackTrace("unknown h2 frame type: " + type);
         if (streamId < 0)
             throw new ExceptionWithoutStackTrace("invalid stream id: " + streamId);
 
+        // new frame, so the proxy target must be removed before processing
+        ctx.currentProxyTarget = null;
+
         parsingFrame = h2frames[type].get();
         parsingFrame.length = len;
         parsingFrame.flags = flags;
         parsingFrame.streamId = streamId;
         parsingFrame.setFlags(flags);
+
+        unsetPriorityFrameHeaderBytes(data);
 
         if (state == STATE_FIRST_SETTINGS_FRAME_HEADER) {
             if (parsingFrame.type != HttpFrameType.SETTINGS)
@@ -208,6 +249,17 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 throw new ExceptionWithoutStackTrace("expecting headers frame header but got " + parsingFrame.type);
         }
 
+        handleFrameHeader(data);
+
+        if (parsingFrame.length == 0) {
+            readFramePayload(ByteArray.allocate(0));
+        } else {
+            expectNewFrame = false; // expecting payload
+            setLen(parsingFrame.length);
+        }
+    }
+
+    private void handleFrameHeader(ByteArray data) throws Exception {
         switch (parsingFrame.type) {
             case SETTINGS:
                 if (state == STATE_FIRST_SETTINGS_FRAME_HEADER) {
@@ -218,14 +270,13 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 break;
             case DATA:
                 determineProxiedConnection();
+                proxyFrameHeader(data);
                 state = STATE_DATA_FRAME;
                 break;
             case HEADERS:
-                determineProxiedConnection();
                 state = STATE_HEADERS_FRAME;
                 break;
             case CONTINUATION:
-                determineProxiedConnection();
                 if (state != STATE_CONTINUATION_FRAME_HEADER) {
                     throw new ExceptionWithoutStackTrace("unexpected continuation frame");
                 }
@@ -235,16 +286,30 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 state = STATE_OTHER_FRAME;
                 break;
         }
+    }
 
-        if (parsingFrame.length == 0) {
-            readFramePayload(ByteArray.allocate(0));
-        } else {
-            expectNewFrame = false; // expecting payload
-            setLen(parsingFrame.length);
+    private void unsetPriorityFrameHeaderBytes(ByteArray frameHeader) {
+        if (parserMode) {
+            return;
         }
+
+        int len = frameHeader.uint24(0);
+        byte flags = frameHeader.get(4);
+        if (parsingFrame instanceof WithPriority) {
+            if (((WithPriority) parsingFrame).priority()) {
+                len -= (4 + 1);
+            }
+            flags &= ~0x20;
+        }
+        frameHeader.int24(0, len);
+        frameHeader.set(4, flags);
     }
 
     private void determineProxiedConnection() {
+        if (parserMode) {
+            return;
+        }
+
         if (connId != 0) { // do not determine for backend connections
             return;
         }
@@ -262,13 +327,49 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
             }
         } else {
             assert Logger.lowLevelDebug("stream " + streamId + " not found, register it");
-            streamHolder.register(streamId, initialSendingWindow, initialReceivingWindow);
+            currentPendingStream = streamHolder.register(streamId, initialSendingWindow, initialReceivingWindow);
             ctx.currentProxyTarget = null;
         }
     }
 
+    private int getProxiedStreamId() throws Exception {
+        int streamId = parsingFrame.streamId;
+        Stream stream = streamHolder.get(streamId);
+        if (stream == null) {
+            String errMsg = "cannot find stream " + streamId + " for proxying frame header";
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, errMsg);
+            throw new Exception(errMsg);
+        }
+        StreamSession session = stream.getSession();
+        // otherwise
+        if (session == null) {
+            // it is expected to be null if it's the first frontend frame on a new stream
+            if (connId == 0) {
+                assert Logger.lowLevelDebug("proxied stream id is set to 1 for frontend frame " + parsingFrame);
+                return 1;
+            }
+            String errMsg = "the stream " + streamId + " is not bond to any session, frame header cannot be proxied";
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, errMsg);
+            throw new Exception(errMsg);
+        }
+        Stream another = session.another(stream);
+        int proxiedStreamId = (int) another.streamId;
+        assert Logger.lowLevelDebug("session found for proxied stream id, set to " + proxiedStreamId + " for " + parsingFrame);
+        return proxiedStreamId;
+    }
+
+    private void proxyFrameHeader(ByteArray data) throws Exception {
+        if (parserMode) {
+            return;
+        }
+
+        dataToProxy = data.int32(5, getProxiedStreamId());
+    }
+
     private void readFramePayload(ByteArray data) throws Exception {
         parsingFrame.setPayload(this, data);
+
+        unsetPriority();
 
         handleFrame();
 
@@ -287,31 +388,71 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         lastParsedFrame = parsingFrame;
     }
 
-    private void handleFrame() throws Exception {
-        if (state == STATE_FIRST_SETTINGS_FRAME) {
-            handleFirstSettingsFrame();
-        } else if (parsingFrame instanceof HeadersFrame) {
-            HeadersFrame headersFrame = (HeadersFrame) parsingFrame;
-            handleAllHeaders();
-            if (headersFrame.endHeaders) {
-                handleEndHeaders();
-            }
-            serializeToProxy(parsingFrame);
-        } else if (parsingFrame instanceof ContinuationFrame) {
-            handleAllHeaders();
-            ContinuationFrame continuationFrame = (ContinuationFrame) parsingFrame;
-            if (continuationFrame.endHeaders) {
-                handleEndHeaders();
-            }
-            serializeToProxy(parsingFrame);
-        } else if (parsingFrame instanceof SettingsFrame) {
-            handleSettingsFrame();
-        } else if (parsingFrame instanceof WindowUpdateFrame) {
-            handleWindowUpdate();
+    private void unsetPriority() {
+        if (parserMode) {
+            return;
+        }
+
+        HttpFrame frame = parsingFrame;
+        if (frame instanceof WithPriority) {
+            ((WithPriority) frame).unsetPriority();
         }
     }
 
-    private void serializeToProxy(HttpFrame frame) throws Exception {
+    private void handleFrame() throws Exception {
+        if (parserMode) {
+            return;
+        }
+
+        if (state == STATE_FIRST_SETTINGS_FRAME) {
+            handleFirstSettingsFrame();
+        } else {
+            switch (parsingFrame.type) {
+                case HEADERS:
+                    determineProxiedConnection();
+                    handleCommonHeaders();
+                    HeadersFrame headersFrame = (HeadersFrame) parsingFrame;
+                    if (headersFrame.endHeaders) {
+                        handleEndHeaders();
+                    }
+                    serializeToProxy(false);
+                    break;
+                case CONTINUATION:
+                    determineProxiedConnection();
+                    handleCommonHeaders();
+                    ContinuationFrame continuationFrame = (ContinuationFrame) parsingFrame;
+                    if (continuationFrame.endHeaders) {
+                        handleEndHeaders();
+                    }
+                    determineProxiedConnection();
+                    serializeToProxy(false);
+                    break;
+                case DATA:
+                    Logger.shouldNotHappen("DATA frame payload should be direct proxied");
+                    serializeToProxy(true);
+                    break;
+                case PUSH_PROMISE:
+                    allocateStreamForPushPromise();
+                    serializeToProxy(false);
+                    break;
+                case SETTINGS:
+                    handleSettingsFrame();
+                    break;
+                case WINDOW_UPDATE:
+                    handleWindowUpdate();
+                    break;
+                case PING:
+                    handlePingFrame();
+                    break;
+                case PRIORITY:
+                    // black hole
+                    break;
+            }
+        }
+    }
+
+    private void serializeToProxy(boolean onlyPayload) throws Exception {
+        HttpFrame frame = parsingFrame;
         int streamId = frame.streamId;
         if (streamId == 0) {
             String err = "frames used to call serializeToProxy must be attached to a stream";
@@ -327,14 +468,34 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
 
         var session = stream.getSession();
         if (session == null) { // not established
-            String err = "cannot proxy frame " + frame + " because the target stream is not established";
-            Logger.warn(LogType.INVALID_EXTERNAL_DATA, err);
-            throw new Exception(err);
+            if (currentPendingStream == null) {
+                String err = "cannot proxy frame " + frame + " because the target stream is not established";
+                Logger.warn(LogType.INVALID_EXTERNAL_DATA, err);
+                throw new Exception(err);
+            } else {
+                assert Logger.lowLevelDebug("session not established yet, hold for now");
+                if (dataPendingToBeProxied) {
+                    String err = "cannot proxy frame " + frame + " because the target stream is not established";
+                    Logger.warn(LogType.INVALID_EXTERNAL_DATA, err);
+                    throw new Exception(err);
+                }
+                dataPendingToBeProxied = true;
+                dataToProxy = Processor.REQUIRE_CONNECTION;
+                return;
+            }
         }
 
         var another = session.another(stream);
         frame.streamId = (int) another.streamId;
-        dataToProxy = frame.serializeH2(another.ctx);
+        if (onlyPayload) {
+            dataToProxy = frame.serializeH2Payload(another.ctx);
+        } else {
+            dataToProxy = frame.serializeH2(another.ctx);
+        }
+
+        if (connId == 0) { // frontend
+            ctx.currentProxyTarget = another;
+        }
     }
 
     private void handleFirstSettingsFrame() throws ExceptionWithoutStackTrace {
@@ -356,9 +517,11 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         produced = ACK_SETTINGS;
     }
 
-    private void handleAllHeaders() {
+    private void handleCommonHeaders() {
         String path = null;
         String host = null;
+
+        parsingFrame.flags = 0; // clear flags, they will be set after serializing
 
         var headers = ((WithHeaders) parsingFrame).headers();
         for (var ite = headers.iterator(); ite.hasNext(); ) {
@@ -402,6 +565,27 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         }
     }
 
+    private void allocateStreamForPushPromise() throws Exception {
+        if (connId == 0) {
+            String errMsg = "got push promise frame on a frontend connection: " + parsingFrame;
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, errMsg);
+            throw new Exception(errMsg);
+        }
+        PushPromiseFrame pushPromise = (PushPromiseFrame) parsingFrame;
+        int promisedStreamId = pushPromise.promisedStreamId;
+        if (streamHolder.contains(promisedStreamId)) {
+            String errMsg = "promised stream " + promisedStreamId + " already exists when processing push-promise frame: " + pushPromise;
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, errMsg);
+            throw new Exception(errMsg);
+        }
+        Stream frontendStream = ctx.frontend.streamHolder.createServerStream(ctx.frontend.initialSendingWindow, ctx.frontend.initialReceivingWindow);
+        assert Logger.lowLevelDebug("allocated frontend promised stream is " + frontendStream.streamId);
+        Stream backendStream = streamHolder.register(promisedStreamId, initialSendingWindow, initialReceivingWindow);
+        new StreamSession(frontendStream, backendStream);
+
+        pushPromise.promisedStreamId = (int) frontendStream.streamId;
+    }
+
     private void handleSettingsFrame() {
         assert Logger.lowLevelDebug("got settings frame: " + parsingFrame);
         SettingsFrame settings = (SettingsFrame) parsingFrame;
@@ -438,6 +622,19 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
             }
             stream.sendingWindow += incr;
         }
+    }
+
+    private void handlePingFrame() {
+        assert Logger.lowLevelDebug("got ping frame: " + parsingFrame);
+        PingFrame ping = (PingFrame) parsingFrame;
+        if (ping.ack) {
+            assert Logger.lowLevelDebug("ignore ping ack frames");
+            return;
+        }
+        assert Logger.lowLevelDebug("need to write back ping ack");
+        ping.ack = false;
+        ping.flags = 0; // clear flags
+        produced = ping.serializeH2(this);
     }
 
     private ByteArray produced;
@@ -499,7 +696,9 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
 
     @Override
     public ByteArray connected() {
-        sendInitialFrame();
+        if (connId != 0) { // backend connections
+            sendInitialFrame();
+        }
         return produce();
     }
 

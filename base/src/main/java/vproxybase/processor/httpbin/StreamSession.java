@@ -3,22 +3,25 @@ package vproxybase.processor.httpbin;
 import vproxybase.util.Logger;
 
 public class StreamSession {
-    public final Stream active;
-    public final Stream passive;
+    public final Stream frontend;
+    public final Stream backend;
 
-    public StreamSession(Stream active, Stream passive) {
-        this.active = active;
-        this.passive = passive;
+    public StreamSession(Stream frontend, Stream backend) {
+        this.frontend = frontend;
+        this.backend = backend;
+        assert Logger.lowLevelDebug("stream session establishes: " + this);
+        frontend.setSession(this);
+        backend.setSession(this);
     }
 
     public Stream another(Stream stream) {
-        if (stream == active) {
-            return passive;
+        if (stream == frontend) {
+            return backend;
         }
-        if (stream == passive) {
-            return active;
+        if (stream == backend) {
+            return frontend;
         }
-        String err = "stream " + stream + " is neither active nor passive";
+        String err = "stream " + stream + " is neither frontend nor backend";
         Logger.shouldNotHappen(err);
         throw new RuntimeException(err);
     }
@@ -26,8 +29,8 @@ public class StreamSession {
     @Override
     public String toString() {
         return "StreamSession{" +
-            "active=" + active +
-            ", passive=" + passive +
+            "frontend=" + frontend.streamId + "/" + frontend.ctx.connId +
+            ", backend=" + backend.streamId + "/" + backend.ctx.connId +
             '}';
     }
 }

@@ -18,6 +18,7 @@ public class StreamHolder {
     }
 
     public Stream register(long streamId, int sendingWindow, int receivingWindow) {
+        assert Logger.lowLevelDebug("registering stream " + streamId + " of conn " + ctx.connId);
         if (streams.containsKey(streamId)) {
             String err = "cannot create stream " + streamId + " in conn " + ctx.connId + ": already exists";
             Logger.shouldNotHappen(err);
@@ -67,6 +68,7 @@ public class StreamHolder {
     }
 
     public void terminate(long streamId) {
+        assert Logger.lowLevelDebug("terminating stream " + streamId + " of conn " + ctx.connId);
         Stream stream = streams.remove(streamId);
         if (stream == null) {
             Logger.warn(LogType.INVALID_EXTERNAL_DATA,

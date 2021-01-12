@@ -25,7 +25,7 @@ public class PingFrame extends HttpFrame {
     }
 
     @Override
-    protected byte serializeFlags() {
+    public byte serializeFlags() {
         byte ret = 0;
         if (ack) {
             ret |= 0x1;
@@ -34,7 +34,7 @@ public class PingFrame extends HttpFrame {
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         return ByteArray.allocate(8).int64(0, data);
     }
 

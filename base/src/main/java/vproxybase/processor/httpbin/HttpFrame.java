@@ -1,7 +1,6 @@
 package vproxybase.processor.httpbin;
 
 import vproxybase.util.ByteArray;
-import vproxybase.util.Logger;
 
 public abstract class HttpFrame {
     public int length;
@@ -17,11 +16,7 @@ public abstract class HttpFrame {
 
     abstract public void setPayload(BinaryHttpSubContext subCtx, ByteArray payload) throws Exception;
 
-    public ByteArray serializeH2(BinaryHttpSubContext subCtx) throws Exception {
-        return doSerializeH2(subCtx);
-    }
-
-    private ByteArray doSerializeH2(BinaryHttpSubContext subCtx) throws Exception {
+    public ByteArray serializeH2(BinaryHttpSubContext subCtx) {
         // serialize header
         ByteArray header = ByteArray.allocate(3 + 1 + 1 + 4);
         byte flags = serializeFlags();
@@ -31,18 +26,9 @@ public abstract class HttpFrame {
         return header.concat(payload);
     }
 
-    protected ByteArray serializeH2NoException(BinaryHttpSubContext subCtx) {
-        try {
-            return doSerializeH2(subCtx);
-        } catch (Exception e) {
-            Logger.shouldNotHappen(getClass().getSimpleName() + "#serializeH2 should not fail", e);
-            throw new RuntimeException(e);
-        }
-    }
+    abstract public byte serializeFlags();
 
-    abstract protected byte serializeFlags() throws Exception;
-
-    abstract protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) throws Exception;
+    abstract public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx);
 
     abstract protected void toString(StringBuilder sb);
 

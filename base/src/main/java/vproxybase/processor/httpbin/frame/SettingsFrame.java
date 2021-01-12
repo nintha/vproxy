@@ -6,7 +6,6 @@ import vproxybase.processor.httpbin.HttpFrame;
 import vproxybase.processor.httpbin.HttpFrameType;
 import vproxybase.processor.httpbin.entity.Setting;
 import vproxybase.util.ByteArray;
-import vproxybase.util.Logger;
 
 import java.util.LinkedList;
 import java.util.List;
@@ -134,12 +133,7 @@ public class SettingsFrame extends HttpFrame {
     }
 
     @Override
-    public ByteArray serializeH2(BinaryHttpSubContext subCtx) {
-        return serializeH2NoException(subCtx);
-    }
-
-    @Override
-    protected byte serializeFlags() {
+    public byte serializeFlags() {
         byte ret = 0;
         if (ack) {
             ret |= 0x1;
@@ -148,7 +142,7 @@ public class SettingsFrame extends HttpFrame {
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         ByteArray ret = null;
         if (headerTableSizeSet) {
             //noinspection ConstantConditions

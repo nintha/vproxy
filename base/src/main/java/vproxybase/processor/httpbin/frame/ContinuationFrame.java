@@ -28,7 +28,7 @@ public class ContinuationFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
-    protected byte serializeFlags() {
+    public byte serializeFlags() {
         byte ret = 0;
         if (endHeaders) {
             ret |= 0x4;
@@ -37,7 +37,7 @@ public class ContinuationFrame extends HttpFrame implements WithHeaders {
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) throws Exception {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         return subCtx.getHPack().encode(headers);
     }
 

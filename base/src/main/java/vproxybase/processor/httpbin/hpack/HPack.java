@@ -37,14 +37,14 @@ public class HPack {
         decoder.setMaxHeaderTableSize(size);
     }
 
-    public ByteArray encode(List<Header> headers) throws IOException {
+    public ByteArray encode(List<Header> headers) {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         for (Header h : headers) {
             try {
                 encoder.encodeHeader(baos, h.key, h.value, h.caseSensitive);
             } catch (IOException e) {
                 Logger.shouldNotHappen("hpack encode failed", e);
-                throw e;
+                throw new RuntimeException(e);
             }
         }
         return ByteArray.from(baos.toByteArray());

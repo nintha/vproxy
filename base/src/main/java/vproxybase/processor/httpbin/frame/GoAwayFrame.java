@@ -28,12 +28,12 @@ public class GoAwayFrame extends HttpFrame {
     }
 
     @Override
-    protected byte serializeFlags() {
+    public byte serializeFlags() {
         return 0;
     }
 
     @Override
-    protected ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
+    public ByteArray serializeH2Payload(BinaryHttpSubContext subCtx) {
         return ByteArray.allocate(4 + 4).int32(0, lastStreamId).int32(4, errorCode).concat(additionalDebugData);
     }
 
