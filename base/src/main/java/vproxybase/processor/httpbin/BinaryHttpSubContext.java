@@ -305,18 +305,18 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         frameHeader.set(4, flags);
     }
 
-    private boolean hasSession() {
+    private boolean noSession() {
         if (parsingFrame.streamId == 0) {
-            return false;
+            return true;
         }
         if (!streamHolder.contains(parsingFrame.streamId)) {
-            return false;
+            return true;
         }
         if (streamHolder.get(parsingFrame.streamId).getSession() == null) {
             assert Logger.lowLevelDebug("no session for stream " + parsingFrame.streamId);
-            return false;
+            return true;
         }
-        return true;
+        return false;
     }
 
     private void determineProxiedConnection() {
@@ -667,7 +667,7 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
             Logger.warn(LogType.INVALID_EXTERNAL_DATA, "rst stream on stream 0 is invalid: " + parsingFrame);
             return;
         }
-        if (!hasSession()) {
+        if (noSession()) {
             return;
         }
         determineProxiedConnection();
@@ -685,7 +685,7 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
             assert Logger.lowLevelDebug("goaway frame with streamId == 0");
             return; // ignore it
         }
-        if (!hasSession()) {
+        if (noSession()) {
             return;
         }
         determineProxiedConnection();
