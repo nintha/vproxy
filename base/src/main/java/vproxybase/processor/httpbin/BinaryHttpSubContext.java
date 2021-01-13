@@ -305,6 +305,20 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         frameHeader.set(4, flags);
     }
 
+    private boolean hasSession() {
+        if (parsingFrame.streamId == 0) {
+            return false;
+        }
+        if (!streamHolder.contains(parsingFrame.streamId)) {
+            return false;
+        }
+        if (streamHolder.get(parsingFrame.streamId).getSession() == null) {
+            assert Logger.lowLevelDebug("no session for stream " + parsingFrame.streamId);
+            return false;
+        }
+        return true;
+    }
+
     private void determineProxiedConnection() {
         if (parserMode) {
             return;
@@ -444,8 +458,17 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
                 case PING:
                     handlePingFrame();
                     break;
+                case RST_STREAM:
+                    handleRSTStream();
+                    break;
+                case GOAWAY:
+                    handleGoAway();
+                    break;
                 case PRIORITY:
                     // black hole
+                    break;
+                default:
+                    Logger.shouldNotHappen("unexpected h2 frame: " + parsingFrame);
                     break;
             }
         }
@@ -636,6 +659,37 @@ public class BinaryHttpSubContext extends OOSubContext<BinaryHttpContext> {
         ping.ack = false;
         ping.flags = 0; // clear flags
         produced = ping.serializeH2(this);
+    }
+
+    private void handleRSTStream() throws Exception {
+        assert Logger.lowLevelDebug("got rst stream: " + parsingFrame);
+        if (parsingFrame.streamId == 0) {
+            Logger.warn(LogType.INVALID_EXTERNAL_DATA, "rst stream on stream 0 is invalid: " + parsingFrame);
+            return;
+        }
+        if (!hasSession()) {
+            return;
+        }
+        determineProxiedConnection();
+        serializeToProxy(false);
+    }
+
+    private void handleGoAway() throws Exception {
+        assert Logger.lowLevelDebug("got go away stream: " + parsingFrame);
+        GoAwayFrame goaway = (GoAwayFrame) parsingFrame;
+        if (goaway.lastStreamId == 0) {
+            assert Logger.lowLevelDebug("goaway frame with lastStreamId == 0");
+            return;
+        }
+        if (goaway.streamId == 0) {
+            assert Logger.lowLevelDebug("goaway frame with streamId == 0");
+            return; // ignore it
+        }
+        if (!hasSession()) {
+            return;
+        }
+        determineProxiedConnection();
+        serializeToProxy(false);
     }
 
     private ByteArray produced;
