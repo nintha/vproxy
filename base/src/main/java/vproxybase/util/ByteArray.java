@@ -1,5 +1,6 @@
 package vproxybase.util;
 
+import vjson.parser.ParserUtils;
 import vproxybase.util.bytearray.*;
 import vproxybase.util.nio.ByteArrayChannel;
 
@@ -192,5 +193,49 @@ public interface ByteArray {
         byte[] dataToCompress = toJavaArray();
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         return Utils.gzipCompress(out, dataToCompress);
+    }
+
+    private byte upperByte(byte b) {
+        return 'a' <= b && b <= 'z' ? (byte) (b - ('a' - 'A')) : b;
+    }
+
+    default ByteArray trim() {
+        int len = this.length();
+        int start = 0;
+        while (start < len && ParserUtils.isWhiteSpace((char) this.get(start))) {
+            start++;
+        }
+
+        if (len == start) {
+            return AbstractByteArray.EMPTY;
+        }
+
+        int end = length() - 1;
+        while (end >= 0 && ParserUtils.isWhiteSpace((char) this.get(end))) {
+            end--;
+        }
+
+        if (start == end) {
+            return AbstractByteArray.EMPTY;
+        }
+
+        return this.sub(start, end - start + 1);
+    }
+
+    default boolean equalsIgnoreCase(ByteArray other) {
+        if (this.length() != other.length()) {
+            return false;
+        }
+
+        for (int i = 0; i < length(); i++) {
+            if (upperByte(this.get(i)) != upperByte(other.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    default boolean equalsIgnoreCaseAfterTrim(ByteArray other) {
+        return this.trim().equalsIgnoreCase(other.trim());
     }
 }
